@@ -3,6 +3,7 @@ import FormData from 'form-data';
 import fs from 'fs-extra';
 import path from 'path';
 import crypto from 'crypto';
+import { preprocessSegment } from './audioExtractor.js';
 
 // Get credentials at runtime to ensure .env is loaded
 function getACRCloudConfig() {
@@ -14,9 +15,40 @@ function getACRCloudConfig() {
 }
 
 const PARALLEL_SEGMENTS = parseInt(process.env.PARALLEL_SEGMENTS) || 10;
-const SEGMENT_DURATION = parseInt(process.env.SEGMENT_DURATION) || 60;
+// Use same segment duration as downloader (default 15s)
+const SEGMENT_DURATION = parseInt(process.env.SEGMENT_DURATION) || 15;
 // Process MAXIMUM segments in parallel for fastest identification
 const MAX_CONCURRENT_IDENTIFICATIONS = parseInt(process.env.MAX_CONCURRENT_IDENTIFICATIONS) || 50; // Increased from 20 to 50!
+
+// Simple persistent cache to avoid re-sending identical segments to ACRCloud
+const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || path.join(process.cwd(), 'backend', 'downloads');
+const CACHE_FILE = path.join(DOWNLOAD_DIR, 'ident_cache.json');
+let identCache = new Map();
+
+async function loadCache() {
+  try {
+    if (await fs.pathExists(CACHE_FILE)) {
+      const raw = await fs.readFile(CACHE_FILE, 'utf8');
+      const obj = JSON.parse(raw);
+      identCache = new Map(Object.entries(obj));
+    }
+  } catch (err) {
+    console.warn('Failed to load ident cache:', err.message || err);
+  }
+}
+
+async function saveCache() {
+  try {
+    const obj = Object.fromEntries(identCache);
+    await fs.ensureDir(DOWNLOAD_DIR);
+    await fs.writeFile(CACHE_FILE, JSON.stringify(obj, null, 2), 'utf8');
+  } catch (err) {
+    console.warn('Failed to save ident cache:', err.message || err);
+  }
+}
+
+// Load cache at startup (fire-and-forget)
+loadCache();
 
 /**
  * Generate ACRCloud signature
@@ -72,6 +104,35 @@ async function identifyWithACRCloud(audioFile, segmentIndex) {
     return null;
   }
 
+  // Preprocess segment to improve fingerprint quality (normalize + bandpass)
+  let fileToSend = audioFile;
+  try {
+    fileToSend = await preprocessSegment(audioFile);
+  } catch (preErr) {
+    console.warn('Preprocessing error, using original segment:', preErr.message || preErr);
+    fileToSend = audioFile;
+  }
+
+  // Compute a hash of the file to use as cache key
+  let fileHash = null;
+  try {
+    const buf = await fs.readFile(fileToSend);
+    fileHash = crypto.createHash('sha256').update(buf).digest('hex');
+  } catch (hErr) {
+    console.warn('Failed to hash segment for cache:', hErr.message || hErr);
+  }
+
+  // If cached result exists, return it
+  if (fileHash && identCache.has(fileHash)) {
+    try {
+      const cached = JSON.parse(identCache.get(fileHash));
+      console.log(`Cache hit for segment ${segmentIndex}`);
+      return cached;
+    } catch (cErr) {
+      identCache.delete(fileHash);
+    }
+  }
+
   try {
     const timestamp = Math.floor(Date.now() / 1000);
     const httpMethod = 'POST';
@@ -89,11 +150,11 @@ async function identifyWithACRCloud(audioFile, segmentIndex) {
       timestamp
     );
 
-    const fileStats = await fs.stat(audioFile);
+    const fileStats = await fs.stat(fileToSend);
     const formData = new FormData();
     
     // Use absolute path to avoid issues with special characters
-    const absolutePath = path.isAbsolute(audioFile) ? audioFile : path.resolve(audioFile);
+    const absolutePath = path.isAbsolute(fileToSend) ? fileToSend : path.resolve(fileToSend);
     const filename = path.basename(absolutePath);
     
     // Append file with proper options for ACRCloud
@@ -145,7 +206,7 @@ async function identifyWithACRCloud(audioFile, segmentIndex) {
     if (response.data.status.code === 0 && response.data.metadata?.music?.length > 0) {
       const track = response.data.metadata.music[0];
       console.log(`✅ Identified track in segment ${segmentIndex}: ${track.title} by ${track.artists?.[0]?.name}`);
-      return {
+      const result = {
         title: track.title || 'Unknown',
         artist: track.artists?.[0]?.name || 'Unknown Artist',
         album: track.album?.name || null,
@@ -163,6 +224,18 @@ async function identifyWithACRCloud(audioFile, segmentIndex) {
           isrc: track.external_ids?.isrc || null
         }
       };
+
+      // Cache result if we have a file hash
+      if (fileHash) {
+        try {
+          identCache.set(fileHash, JSON.stringify(result));
+          saveCache();
+        } catch (cacheErr) {
+          console.warn('Failed to write ident cache:', cacheErr.message || cacheErr);
+        }
+      }
+
+      return result;
     }
 
     return null;

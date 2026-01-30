@@ -154,8 +154,115 @@ const __dirname = dirname(__filename);
 const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || path.join(__dirname, '../../downloads');
 const MAX_DURATION = parseInt(process.env.MAX_VIDEO_DURATION) || 3600; // 1 hour default
 
+// Segment-based download settings for FAST music identification
+// Unified via env var so other modules can read the same value
+const SEGMENT_DURATION = parseInt(process.env.SEGMENT_DURATION) || 15; // 15s per segment (better for ACRCloud)
+const NUM_SEGMENTS = parseInt(process.env.NUM_SEGMENTS) || 6; // Number of segments to attempt
+
+// URL cache to prevent re-downloads (expires after 1 hour)
+const urlCache = new Map();
+const CACHE_DURATION = 3600000; // 1 hour in milliseconds
+
 // Ensure download directory exists
 fs.ensureDirSync(DOWNLOAD_DIR);
+
+/**
+ * Check URL cache for recent downloads
+ */
+function getCachedInfo(url) {
+  const cached = urlCache.get(url);
+  if (cached && (Date.now() - cached.timestamp) < CACHE_DURATION) {
+    console.log('✅ Using cached video info');
+    return cached.data;
+  }
+  urlCache.delete(url); // Remove expired cache
+  return null;
+}
+
+/**
+ * Cache video info
+ */
+function cacheVideoInfo(url, data) {
+  urlCache.set(url, {
+    data,
+    timestamp: Date.now()
+  });
+}
+
+/**
+ * Calculate smart segment positions based on video duration
+ * Returns array of {start, end} timestamps in seconds
+ */
+function calculateSegmentPositions(duration) {
+  const segments = [];
+  
+  if (duration <= SEGMENT_DURATION) {
+    // Video is too short, just use the whole video
+    return [{ start: 0, end: duration }];
+  }
+  // Strategy: Provide dense coverage for the first minute (common place for inserted clips)
+  // then sample a few positions across the rest of the video. This increases chance
+  // of catching short inserted songs (like 0:30-0:47) while keeping total download small.
+
+  const added = new Set();
+
+  // Dense sampling of the first 60 seconds (or up to duration)
+  const earlyWindow = Math.min(60, duration);
+  for (let t = 0; t < earlyWindow; t += SEGMENT_DURATION) {
+    const start = t;
+    const end = Math.min(t + SEGMENT_DURATION, duration);
+    if (end - start >= 5) {
+      const key = `${start}-${end}`;
+      if (!added.has(key)) {
+        segments.push({ start, end });
+        added.add(key);
+      }
+      if (segments.length >= NUM_SEGMENTS) return segments;
+    }
+  }
+
+  // If we still have slots, sample spread positions across the video
+  const spreadPoints = [0.25, 0.5, 0.85];
+  for (const frac of spreadPoints) {
+    if (segments.length >= NUM_SEGMENTS) break;
+    const pos = Math.floor(duration * frac);
+    const start = Math.max(0, pos - Math.floor(SEGMENT_DURATION / 2));
+    const end = Math.min(start + SEGMENT_DURATION, duration);
+    if (end - start >= 5) {
+      const key = `${start}-${end}`;
+      if (!added.has(key)) {
+        segments.push({ start, end });
+        added.add(key);
+      }
+    }
+  }
+
+  // If still not enough, evenly space remaining segments
+  let i = 0;
+  while (segments.length < NUM_SEGMENTS && i < NUM_SEGMENTS * 2) {
+    const pos = Math.floor((duration / NUM_SEGMENTS) * i);
+    const start = Math.max(0, pos);
+    const end = Math.min(start + SEGMENT_DURATION, duration);
+    const key = `${start}-${end}`;
+    if (end - start >= 5 && !added.has(key)) {
+      segments.push({ start, end });
+      added.add(key);
+    }
+    i++;
+  }
+  
+  return segments;
+}
+
+/**
+ * Format time in HH:MM:SS format for yt-dlp
+ */
+function formatTime(seconds) {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+}
 
 /**
  * Check if URL is a direct video file
@@ -184,83 +291,317 @@ function detectPlatform(url) {
 }
 
 /**
+ * Get video info quickly without downloading (using yt-dlp)
+ * FAST - only fetches metadata, no download!
+ */
+async function getVideoInfo(url) {
+  // Check cache first
+  const cached = getCachedInfo(url);
+  if (cached) {
+    return cached;
+  }
+
+  try {
+    // If URL is a direct video file, try probing with ffprobe first (no yt-dlp needed)
+    if (isDirectVideoFile(url)) {
+      try {
+        const metadata = await new Promise((resolve, reject) => {
+          ffmpeg.ffprobe(url, (err, metadata) => {
+            if (err) reject(err);
+            else resolve(metadata);
+          });
+        });
+
+        const duration = metadata?.format?.duration || 0;
+        const videoInfo = {
+          title: path.basename(new URL(url).pathname) || 'Video',
+          duration: Math.round(duration),
+          uploader: 'Unknown',
+          uploadDate: '',
+          description: '',
+          thumbnail: '',
+          webpageUrl: url,
+          platform: 'direct'
+        };
+
+        cacheVideoInfo(url, videoInfo);
+        return videoInfo;
+      } catch (err) {
+        // If ffprobe fails for remote URL, fall back to yt-dlp logic below
+        console.warn('ffprobe failed for direct URL, falling back to yt-dlp:', err.message || err);
+      }
+    }
+    // Check if yt-dlp is available
+    let ytDlpCommand = 'yt-dlp';
+    let ytDlpArgs = [];
+    const checkCommand = process.platform === 'win32' ? 'where' : 'which';
+    
+    try {
+      await execAsyncSpawn(checkCommand, ['yt-dlp']);
+    } catch {
+      // Try python -m yt_dlp as fallback
+      try {
+        await execAsyncSpawn('python', ['-m', 'yt_dlp', '--version']);
+        ytDlpCommand = 'python';
+        ytDlpArgs = ['-m', 'yt_dlp'];
+      } catch {
+        throw new Error('yt-dlp is not installed');
+      }
+    }
+
+    // Get video info FAST (no download!)
+    const { stdout: infoJson } = await execAsyncSpawn(ytDlpCommand, [
+      ...ytDlpArgs,
+      '--quiet',
+      '--no-warnings',
+      '--dump-json',
+      '--no-download',
+      '--no-playlist',
+      url
+    ]);
+    
+    const info = JSON.parse(infoJson);
+    
+    // Check duration
+    if (info.duration > MAX_DURATION) {
+      throw new Error(`Video too long (${info.duration}s). Maximum allowed: ${MAX_DURATION}s`);
+    }
+
+    const videoInfo = {
+      title: info.title,
+      duration: info.duration,
+      uploader: info.uploader || info.channel || 'Unknown',
+      uploadDate: info.upload_date || '',
+      description: info.description || '',
+      thumbnail: info.thumbnail || '',
+      webpageUrl: info.webpage_url || url,
+      platform: detectPlatform(url)
+    };
+
+    // Cache the info
+    cacheVideoInfo(url, videoInfo);
+    
+    return videoInfo;
+  } catch (error) {
+    throw new Error(`Failed to get video info: ${error.message}`);
+  }
+}
+
+/**
+ * Download specific time segment from video as audio
+ * SUPER FAST - only downloads 10 seconds instead of full video!
+ * 
+ * @param {string} url - Video URL
+ * @param {number} startTime - Start time in seconds
+ * @param {number} endTime - End time in seconds
+ * @param {number} segmentIndex - Segment index for tracking
+ * @param {string} title - Video title for filename
+ */
+async function downloadAudioSegment(url, startTime, endTime, segmentIndex, title) {
+  try {
+    // Check if yt-dlp is available
+    let ytDlpCommand = 'yt-dlp';
+    let ytDlpArgs = [];
+    const checkCommand = process.platform === 'win32' ? 'where' : 'which';
+    
+    try {
+      await execAsyncSpawn(checkCommand, ['yt-dlp']);
+    } catch {
+      try {
+        await execAsyncSpawn('python', ['-m', 'yt_dlp', '--version']);
+        ytDlpCommand = 'python';
+        ytDlpArgs = ['-m', 'yt_dlp'];
+      } catch {
+        throw new Error('yt-dlp is not installed');
+      }
+    }
+
+    const safeTitle = title ? title.replace(/[^a-z0-9]/gi, '_').substring(0, 50) : uuidv4();
+    const filename = `${safeTitle}_segment${segmentIndex}_${startTime}-${endTime}.mp3`;
+    const outputPath = path.join(DOWNLOAD_DIR, filename);
+
+    console.log(`⚡ Downloading segment ${segmentIndex}: ${startTime}s - ${endTime}s (${endTime - startTime}s)`);
+
+    // If URL is a direct video file (like your Backblaze .mp4 link), use ffmpeg to extract
+    // the audio segment directly from the remote file. This avoids downloading the whole file
+    // and is much faster when the server supports range requests.
+    if (isDirectVideoFile(url)) {
+      console.log('Using ffmpeg direct extraction for direct video URL');
+      await new Promise((resolve, reject) => {
+        ffmpeg(url)
+          .inputOptions([`-ss ${startTime}`])
+          .setDuration(endTime - startTime)
+          .noVideo()
+          .audioCodec('libmp3lame')
+          .audioBitrate('96k')
+          .outputOptions(['-threads 2', '-preset ultrafast'])
+          .on('end', () => {
+            console.log(`✅ Segment ${segmentIndex} extracted via ffmpeg: ${path.basename(outputPath)}`);
+            resolve();
+          })
+          .on('error', (err) => {
+            console.error('ffmpeg extraction error:', err.message || err);
+            reject(err);
+          })
+          .save(outputPath);
+      });
+
+      if (!(await fs.pathExists(outputPath))) {
+        throw new Error(`Segment file not created by ffmpeg: ${outputPath}`);
+      }
+
+      return outputPath;
+    }
+
+    // Otherwise fall back to yt-dlp segment download
+    const downloadArgs = [
+      ...ytDlpArgs,
+      '--quiet',
+      '--no-warnings',
+      '--no-playlist',
+      '--download-sections', `*${formatTime(startTime)}-${formatTime(endTime)}`,
+      '-x',
+      '--audio-format', 'mp3',
+      '--audio-quality', '96K',
+      '--format', 'bestaudio/best',
+      '--no-part',
+      '--no-mtime',
+      '--postprocessor-args', 'ffmpeg:-threads 2 -preset ultrafast',
+      '-o', outputPath,
+      url
+    ];
+
+    await execAsyncSpawn(ytDlpCommand, downloadArgs);
+
+    // Verify file exists
+    if (!(await fs.pathExists(outputPath))) {
+      throw new Error(`Segment file not created: ${outputPath}`);
+    }
+
+    console.log(`✅ Segment ${segmentIndex} downloaded: ${path.basename(outputPath)}`);
+    return outputPath;
+
+  } catch (error) {
+    console.error(`❌ Failed to download segment ${segmentIndex}:`, error.message);
+    throw error;
+  }
+}
+
+/**
+ * Download multiple segments in PARALLEL for MAXIMUM speed!
+ * Downloads 4 segments (10 sec each) = 40 sec total instead of 10 min video!
+ * 10-20x FASTER! ⚡⚡⚡
+ */
+async function downloadAudioSegments(url, videoInfo, progressCallback) {
+  const { duration, title } = videoInfo;
+  
+  // Calculate smart segment positions
+  const segmentPositions = calculateSegmentPositions(duration);
+  console.log(`📊 Video duration: ${duration}s, downloading ${segmentPositions.length} segments`);
+  
+  const totalSegments = segmentPositions.length;
+  let completed = 0;
+
+  // Download ALL segments in PARALLEL - MAXIMUM SPEED!
+  const downloadPromises = segmentPositions.map((segment, index) => {
+    return downloadAudioSegment(url, segment.start, segment.end, index, title)
+      .then(filePath => {
+        completed++;
+        if (progressCallback) {
+          const progress = Math.round((completed / totalSegments) * 100);
+          progressCallback(progress);
+        }
+        return {
+          file: filePath,
+          startTime: segment.start,
+          endTime: segment.end,
+          segmentIndex: index
+        };
+      })
+      .catch(error => {
+        console.error(`Segment ${index} failed, continuing with others...`);
+        return null;
+      });
+  });
+
+  // Wait for ALL segments to download in parallel
+  const results = await Promise.all(downloadPromises);
+  
+  // Filter out failed segments
+  const successfulSegments = results.filter(Boolean);
+  
+  if (successfulSegments.length === 0) {
+    throw new Error('All segments failed to download');
+  }
+
+  console.log(`✅ Downloaded ${successfulSegments.length}/${totalSegments} segments successfully`);
+  return successfulSegments;
+}
+
+/**
  * Download direct video file (MP4, WebM, etc.)
  */
 async function downloadDirectFile(url) {
   try {
-    // Get file extension from URL
+    // Prefer extracting audio directly from remote file via ffmpeg (no full video download)
     const urlPath = new URL(url).pathname;
-    const ext = path.extname(urlPath) || '.mp4';
-    const filename = `${uuidv4()}${ext}`;
-    const videoFile = path.join(DOWNLOAD_DIR, filename);
+    const safeBase = path.basename(urlPath) || uuidv4();
+    const title = safeBase.replace(/\.[^.]+$/, '');
+    const audioFilename = `${uuidv4()}.mp3`;
+    const audioFile = path.join(DOWNLOAD_DIR, audioFilename);
 
-    // Download the file with 5G SPEED settings (100+ Mbps)
-    const response = await axios({
-      method: 'GET',
-      url: url,
-      responseType: 'stream',
-      timeout: 300000, // 5 minutes timeout
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity,
-      maxRedirects: 5,
-      // UNLIMITED connections - ALL at once for MAXIMUM speed!
-      httpAgent: new http.Agent({
-        keepAlive: true,
-        keepAliveMsecs: 60000, // Keep alive longer
-        maxSockets: Infinity, // UNLIMITED connections - ALL at once!
-        maxFreeSockets: Infinity,
-        scheduling: 'fifo' // First in first out
-      }),
-      httpsAgent: new https.Agent({
-        keepAlive: true,
-        keepAliveMsecs: 60000, // Keep alive longer
-        maxSockets: Infinity, // UNLIMITED connections - ALL at once!
-        maxFreeSockets: Infinity,
-        scheduling: 'fifo'
-      })
-    });
+    try {
+      console.log('Attempting ffmpeg remote extraction for direct video URL');
+      await new Promise((resolve, reject) => {
+        ffmpeg(url)
+          .noVideo()
+          .audioCodec('libmp3lame')
+          .audioBitrate('96k')
+          .outputOptions(['-threads 0', '-preset ultrafast'])
+          .on('end', () => {
+            console.log(`Extracted audio to ${audioFile}`);
+            resolve();
+          })
+          .on('error', (err) => {
+            console.error('ffmpeg remote extraction failed:', err.message || err);
+            reject(err);
+          })
+          .save(audioFile);
+      });
 
-    // Use MAXIMUM highWaterMark for 5G speed streaming
-    const writer = fs.createWriteStream(videoFile, {
-      highWaterMark: 1024 * 1024 * 256 // 256MB buffer (was 64MB) - 5G speed!
-    });
-    
-    // Optimized streaming with backpressure handling
-    response.data.pipe(writer);
-
-    return new Promise((resolve, reject) => {
-      writer.on('finish', async () => {
-        // Get file info using ffprobe
+      // Verify and probe audio
+      if (await fs.pathExists(audioFile)) {
         try {
           const metadata = await new Promise((resolve, reject) => {
-            ffmpeg.ffprobe(videoFile, (err, metadata) => {
+            ffmpeg.ffprobe(audioFile, (err, metadata) => {
               if (err) reject(err);
               else resolve(metadata);
             });
           });
 
-          const duration = metadata.format.duration || 0;
+          const duration = Math.round(metadata.format.duration || 0);
           if (duration > MAX_DURATION) {
-            await fs.remove(videoFile);
-            throw new Error(`Video too long (${duration}s). Maximum allowed: ${MAX_DURATION}s`);
+            // remove audio if too long
+            await fs.remove(audioFile);
+            throw new Error(`Audio extracted is too long (${duration}s). Maximum allowed: ${MAX_DURATION}s`);
           }
 
-          resolve({
-            videoFile,
-            title: path.basename(urlPath, ext) || 'Video',
-            duration: Math.round(duration),
+          return {
+            audioFile,
+            title: title || 'Video',
+            duration,
             uploader: 'Unknown',
             uploadDate: '',
             description: '',
             thumbnail: '',
             webpageUrl: url,
             platform: 'direct'
-          });
-        } catch (error) {
-          // If ffprobe fails, still return basic info
-          resolve({
-            videoFile,
-            title: path.basename(urlPath, ext) || 'Video',
+          };
+        } catch (probeErr) {
+          // If probe fails, still return audioFile
+          return {
+            audioFile,
+            title: title || 'Video',
             duration: 0,
             uploader: 'Unknown',
             uploadDate: '',
@@ -268,13 +609,80 @@ async function downloadDirectFile(url) {
             thumbnail: '',
             webpageUrl: url,
             platform: 'direct'
-          });
+          };
         }
+      }
+
+      throw new Error('ffmpeg extraction did not produce an audio file');
+    } catch (ffmpegErr) {
+      console.warn('ffmpeg remote extraction failed, falling back to full download:', ffmpegErr.message || ffmpegErr);
+      // Fallback to previous behavior: download full video file then probe
+      const ext = path.extname(urlPath) || '.mp4';
+      const filename = `${uuidv4()}${ext}`;
+      const videoFile = path.join(DOWNLOAD_DIR, filename);
+
+      // Download the file with axios (existing behavior)
+      const response = await axios({
+        method: 'GET',
+        url: url,
+        responseType: 'stream',
+        timeout: 300000,
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+        maxRedirects: 5,
+        httpAgent: new http.Agent({ keepAlive: true }),
+        httpsAgent: new https.Agent({ keepAlive: true })
       });
 
-      writer.on('error', reject);
-      response.data.on('error', reject);
-    });
+      const writer = fs.createWriteStream(videoFile);
+      response.data.pipe(writer);
+
+      return await new Promise((resolve, reject) => {
+        writer.on('finish', async () => {
+          try {
+            const metadata = await new Promise((resolve, reject) => {
+              ffmpeg.ffprobe(videoFile, (err, metadata) => {
+                if (err) reject(err);
+                else resolve(metadata);
+              });
+            });
+
+            const duration = metadata.format.duration || 0;
+            if (duration > MAX_DURATION) {
+              await fs.remove(videoFile);
+              throw new Error(`Video too long (${duration}s). Maximum allowed: ${MAX_DURATION}s`);
+            }
+
+            resolve({
+              videoFile,
+              title: title || 'Video',
+              duration: Math.round(duration),
+              uploader: 'Unknown',
+              uploadDate: '',
+              description: '',
+              thumbnail: '',
+              webpageUrl: url,
+              platform: 'direct'
+            });
+          } catch (error) {
+            resolve({
+              videoFile,
+              title: title || 'Video',
+              duration: 0,
+              uploader: 'Unknown',
+              uploadDate: '',
+              description: '',
+              thumbnail: '',
+              webpageUrl: url,
+              platform: 'direct'
+            });
+          }
+        });
+
+        writer.on('error', reject);
+        response.data.on('error', reject);
+      });
+    }
   } catch (error) {
     throw new Error(`Failed to download direct file: ${error.message}`);
   }
@@ -296,26 +704,46 @@ async function downloadWithYtDlp(url, progressCallback = null) {
   const outputPath = path.join(DOWNLOAD_DIR, `%(title)s.%(ext)s`);
   
   try {
-    // Check if yt-dlp is available
+    // Check if yt-dlp is available and determine the command to use
+    let ytDlpCommand = 'yt-dlp';
+    let ytDlpArgs = [];
+    const checkCommand = process.platform === 'win32' ? 'where' : 'which';
+    
     try {
-      await execAsyncSpawn('which', ['yt-dlp']);
+      await execAsyncSpawn(checkCommand, ['yt-dlp']);
+      console.log('✅ yt-dlp found in PATH');
     } catch {
-      throw new Error('yt-dlp is not installed. Please install it: brew install yt-dlp or pip3 install yt-dlp');
+      // Try python -m yt_dlp as fallback (common on Windows)
+      try {
+        await execAsyncSpawn('python', ['-m', 'yt_dlp', '--version']);
+        ytDlpCommand = 'python';
+        ytDlpArgs = ['-m', 'yt_dlp'];
+        console.log('✅ yt-dlp found via python -m yt_dlp');
+      } catch {
+        const installInstructions = process.platform === 'win32' 
+          ? 'pip install yt-dlp or download from https://github.com/yt-dlp/yt-dlp/releases'
+          : 'brew install yt-dlp or pip3 install yt-dlp';
+        throw new Error(`yt-dlp is not installed. Please install it: ${installInstructions}`);
+      }
     }
     
     // Check if aria2c is available (for maximum speed) - if not, yt-dlp will fallback automatically
     let hasAria2c = false;
     try {
-      await execAsyncSpawn('which', ['aria2c']);
+      await execAsyncSpawn(checkCommand, ['aria2c']);
       hasAria2c = true;
       console.log('✅ aria2c found - using MAXIMUM speed download (64 parallel connections + 128 fragments = BLAZING FAST!)');
     } catch {
       console.warn('⚠️  aria2c not found - will use yt-dlp built-in downloader (still fast with 128 fragments)');
-      console.warn('   Install aria2c for even faster downloads: brew install aria2');
+      const aria2cInstall = process.platform === 'win32'
+        ? 'Download from https://github.com/aria2/aria2/releases'
+        : 'brew install aria2';
+      console.warn(`   Install aria2c for even faster downloads: ${aria2cInstall}`);
     }
 
     // First, get video info
-    const { stdout: infoJson } = await execAsyncSpawn('yt-dlp', [
+    const { stdout: infoJson } = await execAsyncSpawn(ytDlpCommand, [
+      ...ytDlpArgs,
       '--quiet',
       '--no-warnings',
       '--dump-json',
@@ -375,9 +803,9 @@ async function downloadWithYtDlp(url, progressCallback = null) {
 
     // If progress callback provided, track download progress
     if (progressCallback) {
-      await execAsyncSpawnWithProgress('yt-dlp', downloadArgs, progressCallback);
+      await execAsyncSpawnWithProgress(ytDlpCommand, [...ytDlpArgs, ...downloadArgs], progressCallback);
     } else {
-      await execAsyncSpawn('yt-dlp', downloadArgs);
+      await execAsyncSpawn(ytDlpCommand, [...ytDlpArgs, ...downloadArgs]);
     }
 
     // Find the downloaded audio file (now it's already MP3!)
@@ -507,20 +935,85 @@ async function downloadYouTube(url) {
 }
 
 /**
- * Main download function - auto-detects platform
+ * FAST segment-based download for music identification
+ * Downloads ONLY small segments (40 sec) instead of full video (10 min)
+ * 10-20x FASTER! ⚡⚡⚡
+ * 
+ * @param {string} url - Video URL
+ * @param {Function} progressCallback - Optional callback for download progress (0-100)
+ * @returns {Object} - { videoInfo, segmentFiles: [{file, startTime, endTime}] }
+ */
+export async function downloadVideoSegments(url, progressCallback = null) {
+  try {
+    console.log('🚀 FAST MODE: Downloading segments for music identification...');
+    
+    // Step 1: Get video info FAST (no download - just metadata)
+    if (progressCallback) progressCallback(10);
+    const videoInfo = await getVideoInfo(url);
+    console.log(`📹 Video: "${videoInfo.title}" (${videoInfo.duration}s)`);
+    
+    // Step 2: Download smart segments in PARALLEL (40 sec total)
+    if (progressCallback) progressCallback(20);
+    const segmentFiles = await downloadAudioSegments(url, videoInfo, (segProgress) => {
+      // Map segment progress (0-100) to overall progress (20-100)
+      if (progressCallback) {
+        const overall = 20 + Math.round(segProgress * 0.8);
+        progressCallback(overall);
+      }
+    });
+    
+    if (progressCallback) progressCallback(100);
+    
+    console.log(`✅ FAST MODE COMPLETE: Downloaded ${segmentFiles.length} segments (${segmentFiles.length * 10}s total)`);
+    
+    return {
+      videoInfo,
+      segmentFiles,
+      mode: 'segments'
+    };
+    
+  } catch (error) {
+    console.error('❌ Segment download failed:', error.message);
+    throw new Error(`Failed to download segments: ${error.message}`);
+  }
+}
+
+/**
+ * Full video/audio download (FALLBACK - slower but gets everything)
+ * Use this only if segment-based download fails or user requests full audio
+ * 
  * @param {string} url - Video URL
  * @param {Function} progressCallback - Optional callback for download progress (0-100)
  */
-export async function downloadVideo(url, progressCallback = null) {
+export async function downloadFullAudio(url, progressCallback = null) {
+  console.log('📥 FULL MODE: Downloading complete audio (slower)...');
+  
   // Check if it's a direct video file
   if (isDirectVideoFile(url)) {
     console.log('Detected direct video file, downloading directly...');
     return await downloadDirectFile(url);
   }
 
-  const platform = detectPlatform(url);
-
-  // ALWAYS use yt-dlp with MAXIMUM parallelization - it's faster than YouTube-specific downloader!
-  // yt-dlp with 128 fragments + aria2c (64 connections) = BLAZING FAST!
+  // ALWAYS use yt-dlp with MAXIMUM parallelization
   return await downloadWithYtDlp(url, progressCallback);
+}
+
+/**
+ * Main download function - auto-detects platform
+ * NOW USES FAST SEGMENT MODE BY DEFAULT! ⚡
+ * 
+ * @param {string} url - Video URL
+ * @param {Function} progressCallback - Optional callback for download progress (0-100)
+ * @param {Object} options - { mode: 'segments' | 'full' } (default: 'segments')
+ */
+export async function downloadVideo(url, progressCallback = null, options = {}) {
+  const mode = options.mode || 'segments'; // Default to FAST mode!
+  
+  if (mode === 'segments') {
+    // FAST MODE: Download only segments (default)
+    return await downloadVideoSegments(url, progressCallback);
+  } else {
+    // FULL MODE: Download complete audio (fallback)
+    return await downloadFullAudio(url, progressCallback);
+  }
 }

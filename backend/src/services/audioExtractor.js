@@ -10,7 +10,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || path.join(__dirname, '../../downloads');
-const SEGMENT_DURATION = parseInt(process.env.SEGMENT_DURATION) || 60; // 60 seconds per chunk
+// Keep segment duration consistent with downloader (default 15s)
+const SEGMENT_DURATION = parseInt(process.env.SEGMENT_DURATION) || 15; // seconds per chunk
 
 // Get CPU count for maximum parallel processing
 const CPU_COUNT = os.cpus().length;
@@ -105,5 +106,35 @@ export function splitAudioSegments(audioFile) {
         })
         .run();
     });
+  });
+}
+
+/**
+ * Preprocess an audio segment: normalize loudness and apply a bandpass filter
+ * This often improves fingerprinting accuracy on noisy or mixed audio.
+ * Returns path to processed file (may overwrite or create new file).
+ */
+export async function preprocessSegment(segmentFile) {
+  const parsed = path.parse(segmentFile);
+  const outFile = path.join(parsed.dir, `${parsed.name}_proc${parsed.ext}`);
+
+  return new Promise((resolve, reject) => {
+    ffmpeg(segmentFile)
+      // loudness normalization (EBU R128) - use loudnorm filter
+      .audioFilters([
+        'loudnorm=I=-16:TP=-1.5:LRA=11',
+        // bandpass roughly human voice/music range to reduce low rumble / high hiss
+        'bandpass=f=300:width_type=h:w=4000'
+      ])
+      .audioCodec('libmp3lame')
+      .audioBitrate('96k')
+      .outputOptions(['-threads 1', '-preset veryfast'])
+      .on('end', () => resolve(outFile))
+      .on('error', (err) => {
+        // If preprocessing fails, fall back to original file
+        console.warn('Preprocessing failed for', segmentFile, err.message || err);
+        resolve(segmentFile);
+      })
+      .save(outFile);
   });
 }

@@ -54,7 +54,7 @@ export default function VideoInput({ onExtract }: VideoInputProps) {
                 setIsValid(true)
               }}
               placeholder="https://youtube.com/watch?v=... or any video platform"
-              className={`w-full px-4 py-3 pl-12 border-2 rounded-lg focus:outline-none focus:ring-2 transition ${
+              className={`w-full px-4 py-3 pl-12 border-2 text-black rounded-lg focus:outline-none focus:ring-2 transition ${
                 isValid
                   ? 'border-gray-300 focus:border-primary-500 focus:ring-primary-200'
                   : 'border-red-300 focus:border-red-500 focus:ring-red-200'

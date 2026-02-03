@@ -268,7 +268,7 @@ function formatTime(seconds) {
  * Check if URL is a direct video file
  */
 function isDirectVideoFile(url) {
-  const videoExtensions = ['.mp4', '.webm', '.mkv', '.avi', '.mov', '.flv', '.m4v', '.3gp'];
+  const videoExtensions = ['.mp4', '.webm', '.mkv', '.avi', '.mov', '.flv', '.m4v', '.3gp', '.mp3', '.wav', '.m4a', '.aac', '.ogg', '.wma'];
   const lowerUrl = url.toLowerCase();
   return videoExtensions.some(ext => lowerUrl.includes(ext));
 }
@@ -434,7 +434,7 @@ async function downloadAudioSegment(url, startTime, endTime, segmentIndex, title
           .noVideo()
           .audioCodec('libmp3lame')
           .audioBitrate('96k')
-          .outputOptions(['-threads 2', '-preset ultrafast'])
+          .outputOptions(['-threads 2'])
           .on('end', () => {
             console.log(`✅ Segment ${segmentIndex} extracted via ffmpeg: ${path.basename(outputPath)}`);
             resolve();
@@ -464,9 +464,10 @@ async function downloadAudioSegment(url, startTime, endTime, segmentIndex, title
       '--audio-format', 'mp3',
       '--audio-quality', '96K',
       '--format', 'bestaudio/best',
+      '--extractor-args', 'youtube:player_client=android',
       '--no-part',
       '--no-mtime',
-      '--postprocessor-args', 'ffmpeg:-threads 2 -preset ultrafast',
+      '--postprocessor-args', 'ffmpeg:-threads 2',
       '-o', outputPath,
       url
     ];
@@ -557,7 +558,7 @@ async function downloadDirectFile(url) {
           .noVideo()
           .audioCodec('libmp3lame')
           .audioBitrate('96k')
-          .outputOptions(['-threads 0', '-preset ultrafast'])
+          .outputOptions(['-threads 0'])
           .on('end', () => {
             console.log(`Extracted audio to ${audioFile}`);
             resolve();
@@ -774,28 +775,19 @@ async function downloadWithYtDlp(url, progressCallback = null) {
       '--audio-format', 'mp3', // Convert to MP3
       '--audio-quality', '96K', // Lower quality = faster encoding
       '--format', 'bestaudio/best', // Get best quality audio format available (faster than converting)
-      '--prefer-ffmpeg', // Use ffmpeg for faster processing
-      '--postprocessor-args', 'ffmpeg:-threads 0 -preset ultrafast', // Use all CPU cores
+      '--postprocessor-args', 'ffmpeg:-threads 0', // Use all CPU cores
       '--extractor-args', 'youtube:player_client=android', // Use faster extractor
-      // Use aria2c for MAXIMUM speed - 32 parallel connections = 100% network usage!
+      // Use aria2c for MAXIMUM speed - 16 parallel connections (max allowed)
       // If aria2c not available, yt-dlp will automatically fallback to built-in downloader
       ...(hasAria2c ? [
         '--external-downloader', 'aria2c',
-        '--external-downloader-args', 'aria2c:-x 64 -s 64 -j 64 -k 5M --max-connection-per-server=64 --min-split-size=1M --split=64'
-        // -x 64: 64 parallel connections per server (MAXIMUM!)
-        // -s 64: Split into 64 pieces
-        // -j 64: 64 concurrent downloads
-        // -k 5M: 5MB chunk size (HUGE = MAXIMUM speed!)
-        // --max-connection-per-server=64: 64 connections per server
-        // --min-split-size=1M: Minimum 1MB per split
-        // --split=64: Split into 64 segments
+        '--external-downloader-args', 'aria2c:-x 16 -s 16 -j 16 -k 5M --max-connection-per-server=16 --min-split-size=1M --split=16'
       ] : []),
       '--no-part', // Don't use .part files (faster)
       '--no-mtime', // Skip mtime (faster)
       '--no-write-thumbnail', // Skip thumbnail (faster)
       '--no-write-info-json', // Skip info json (faster)
       '--no-playlist', // Skip playlists (faster)
-      '--no-call-home', // Don't check for updates (faster)
       '--no-colors', // No colors in output (faster)
       '-o', outputPath,
       url

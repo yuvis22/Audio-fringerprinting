@@ -3,7 +3,7 @@ set -e
 
 # Install yt-dlp
 echo "Installing yt-dlp..."
-pip3 install yt-dlp
+pip3 install yt-dlp --break-system-packages
 
 # Create bin directory
 mkdir -p bin

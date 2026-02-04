@@ -28,6 +28,15 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Root endpoint for Render health check
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'online', 
+    service: 'Audio Fingerprinting Backend',
+    version: '1.0.0'
+  });
+});
+
 // API Routes
 app.use('/api', extractRoutes);
 

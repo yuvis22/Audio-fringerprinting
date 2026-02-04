@@ -7,7 +7,7 @@
     "scripts": {
         "start": "node src/server.js",
         "dev": "nodemon src/server.js",
-        "postinstall": "pip3 install yt-dlp",
+        "postinstall": "bash scripts/postinstall.sh",
         "test": "echo \"Error: no test specified\" && exit 1"
     },
     "keywords": [

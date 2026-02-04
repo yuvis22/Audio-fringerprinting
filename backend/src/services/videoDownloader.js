@@ -12,6 +12,14 @@ import os from 'os';
 import http from 'http';
 import https from 'https';
 
+// Add local bin to PATH for aria2c
+const __filename_init = fileURLToPath(import.meta.url);
+const __dirname_init = dirname(__filename_init);
+const localBin = path.resolve(__dirname_init, '../../bin');
+if (!process.env.PATH.includes(localBin)) {
+  process.env.PATH = `${localBin}:${process.env.PATH}`;
+}
+
 // Custom execAsync with increased buffer size for yt-dlp output
 const execAsync = (command, options = {}) => {
   return new Promise((resolve, reject) => {

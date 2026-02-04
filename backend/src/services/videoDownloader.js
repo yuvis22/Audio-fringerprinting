@@ -339,13 +339,20 @@ async function getVideoInfo(url) {
     try {
       await execAsyncSpawn(checkCommand, ['yt-dlp']);
     } catch {
-      // Try python -m yt_dlp as fallback
+      // Try python3 -m yt_dlp as fallback (preferred on linux/mac)
       try {
-        await execAsyncSpawn('python', ['-m', 'yt_dlp', '--version']);
-        ytDlpCommand = 'python';
+        await execAsyncSpawn('python3', ['-m', 'yt_dlp', '--version']);
+        ytDlpCommand = 'python3';
         ytDlpArgs = ['-m', 'yt_dlp'];
       } catch {
-        throw new Error('yt-dlp is not installed');
+        // Try python -m yt_dlp as fallback (windows)
+        try {
+          await execAsyncSpawn('python', ['-m', 'yt_dlp', '--version']);
+          ytDlpCommand = 'python';
+          ytDlpArgs = ['-m', 'yt_dlp'];
+        } catch {
+          throw new Error('yt-dlp is not installed');
+        }
       }
     }
 
@@ -408,11 +415,17 @@ async function downloadAudioSegment(url, startTime, endTime, segmentIndex, title
       await execAsyncSpawn(checkCommand, ['yt-dlp']);
     } catch {
       try {
-        await execAsyncSpawn('python', ['-m', 'yt_dlp', '--version']);
-        ytDlpCommand = 'python';
+        await execAsyncSpawn('python3', ['-m', 'yt_dlp', '--version']);
+        ytDlpCommand = 'python3';
         ytDlpArgs = ['-m', 'yt_dlp'];
       } catch {
-        throw new Error('yt-dlp is not installed');
+        try {
+          await execAsyncSpawn('python', ['-m', 'yt_dlp', '--version']);
+          ytDlpCommand = 'python';
+          ytDlpArgs = ['-m', 'yt_dlp'];
+        } catch {
+          throw new Error('yt-dlp is not installed');
+        }
       }
     }
 
@@ -714,17 +727,25 @@ async function downloadWithYtDlp(url, progressCallback = null) {
       await execAsyncSpawn(checkCommand, ['yt-dlp']);
       console.log('✅ yt-dlp found in PATH');
     } catch {
-      // Try python -m yt_dlp as fallback (common on Windows)
+      // Try python3 -m yt_dlp as fallback (linux/mac)
       try {
-        await execAsyncSpawn('python', ['-m', 'yt_dlp', '--version']);
-        ytDlpCommand = 'python';
+        await execAsyncSpawn('python3', ['-m', 'yt_dlp', '--version']);
+        ytDlpCommand = 'python3';
         ytDlpArgs = ['-m', 'yt_dlp'];
-        console.log('✅ yt-dlp found via python -m yt_dlp');
+        console.log('✅ yt-dlp found via python3 -m yt_dlp');
       } catch {
-        const installInstructions = process.platform === 'win32' 
-          ? 'pip install yt-dlp or download from https://github.com/yt-dlp/yt-dlp/releases'
-          : 'brew install yt-dlp or pip3 install yt-dlp';
-        throw new Error(`yt-dlp is not installed. Please install it: ${installInstructions}`);
+        // Try python -m yt_dlp as fallback (windows)
+        try {
+          await execAsyncSpawn('python', ['-m', 'yt_dlp', '--version']);
+          ytDlpCommand = 'python';
+          ytDlpArgs = ['-m', 'yt_dlp'];
+          console.log('✅ yt-dlp found via python -m yt_dlp');
+        } catch {
+          const installInstructions = process.platform === 'win32' 
+            ? 'pip install yt-dlp or download from https://github.com/yt-dlp/yt-dlp/releases'
+            : 'brew install yt-dlp or pip3 install yt-dlp';
+          throw new Error(`yt-dlp is not installed. Please install it: ${installInstructions}`);
+        }
       }
     }
     

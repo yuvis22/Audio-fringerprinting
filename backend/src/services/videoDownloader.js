@@ -429,7 +429,7 @@ async function getVideoInfo(url) {
         '--dump-json',
         '--no-download',
         '--no-playlist',
-        '-f', 'b',
+        '-f', 'bestaudio/best', // Use bestaudio to match full download success
         url
       ]);
       infoJson = result.stdout;

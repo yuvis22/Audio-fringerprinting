@@ -419,16 +419,23 @@ async function getVideoInfo(url) {
     const cookieArgs = await getCookieArgs();
 
     // Get video info FAST (no download!)
-    const { stdout: infoJson } = await execAsyncSpawn(ytDlpCommand, [
-      ...ytDlpArgs,
-      ...cookieArgs,
-      '--quiet',
-      '--no-warnings',
-      '--dump-json',
-      '--no-download',
-      '--no-playlist',
-      url
-    ]);
+    let infoJson;
+    try {
+      const result = await execAsyncSpawn(ytDlpCommand, [
+        ...ytDlpArgs,
+        ...cookieArgs,
+        '--quiet',
+        '--no-warnings',
+        '--dump-json',
+        '--no-download',
+        '--no-playlist',
+        url
+      ]);
+      infoJson = result.stdout;
+    } catch (ytError) {
+      console.error('❌ yt-dlp --dump-json FAILED:', ytError.message);
+      throw new Error(`yt-dlp metadata fetch failed: ${ytError.message}`);
+    }
     
     const info = JSON.parse(infoJson);
     
@@ -544,8 +551,8 @@ async function downloadAudioSegment(url, startTime, endTime, segmentIndex, title
       '-x',
       '--audio-format', 'mp3',
       '--audio-quality', '96K',
-      '--format', 'bestaudio/best',
-      '--extractor-args', 'youtube:player_client=android',
+      '--format', 'bestaudio/best[height<=480]/best', // Allow fallback to low-res video if audio-only fails
+      '--force-keyframes-at-cuts',
       '--no-part',
       '--no-mtime',
       '--postprocessor-args', 'ffmpeg:-threads 2',

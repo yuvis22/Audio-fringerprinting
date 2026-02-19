@@ -571,7 +571,8 @@ async function downloadAudioSegment(url, startTime, endTime, segmentIndex, title
       '-x',
       '--audio-format', 'mp3',
       '--audio-quality', '96K',
-      '--format', 'bestaudio/best[height<=480]/best', // Allow fallback to low-res video if audio-only fails
+      '--format', 'bestaudio/best', // Match full download
+      '--extractor-args', 'youtube:player_client=android', // Match full download
       '--force-keyframes-at-cuts',
       '--no-part',
       '--no-mtime',

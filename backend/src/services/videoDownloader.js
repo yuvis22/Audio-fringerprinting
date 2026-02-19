@@ -421,6 +421,7 @@ async function getVideoInfo(url) {
     // Get video info FAST (no download!)
     let infoJson;
     try {
+      // Attempt 1: Try with same args as full download (proven to work)
       const result = await execAsyncSpawn(ytDlpCommand, [
         ...ytDlpArgs,
         ...cookieArgs,
@@ -429,13 +430,31 @@ async function getVideoInfo(url) {
         '--dump-json',
         '--no-download',
         '--no-playlist',
-        '-f', 'bestaudio/best', // Use bestaudio to match full download success
+        '-f', 'bestaudio/best', // Match full download
+        '--extractor-args', 'youtube:player_client=android', // Match full download
         url
       ]);
       infoJson = result.stdout;
     } catch (ytError) {
-      console.error('❌ yt-dlp --dump-json FAILED:', ytError.message);
-      throw new Error(`yt-dlp metadata fetch failed: ${ytError.message}`);
+      console.warn('⚠️ Standard metadata fetch failed, retrying without format constraints:', ytError.message);
+      
+      try {
+        // Attempt 2: Fallback to loose search (no format specified)
+        const result = await execAsyncSpawn(ytDlpCommand, [
+          ...ytDlpArgs,
+          ...cookieArgs,
+          '--quiet',
+          '--no-warnings',
+          '--dump-json',
+          '--no-download',
+          '--no-playlist',
+          url
+        ]);
+        infoJson = result.stdout;
+      } catch (retryError) {
+         console.error('❌ yt-dlp --dump-json FAILED (both attempts):', retryError.message);
+         throw new Error(`yt-dlp metadata fetch failed: ${retryError.message}`);
+      }
     }
     
     const info = JSON.parse(infoJson);

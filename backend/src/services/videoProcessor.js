@@ -29,6 +29,7 @@ export async function processVideo(taskId, videoUrl, jobs) {
     // ⚡ STEP 1: FAST segment-based download (NEW!)
     // Downloads ONLY 40 seconds of audio from strategic positions
     // Instead of downloading 10 min video = 15x FASTER!
+    console.log(`[${taskId}] ✅✅✅ CODE UPDATED v3 - FAST MODE IMPROVED ✅✅✅`); 
     console.log(`[${taskId}] 🚀 FAST MODE: Downloading smart segments...`);
     job.downloadProgress = 0;
     

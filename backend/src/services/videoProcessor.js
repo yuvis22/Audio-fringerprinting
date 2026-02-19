@@ -56,8 +56,9 @@ export async function processVideo(taskId, videoUrl, jobs) {
         videoInfo = downloadResult.videoInfo;
       }
     } catch (segmentError) {
-      console.warn(`[${taskId}] ⚠️  Segment download failed, falling back to full audio...`);
-      console.warn(`[${taskId}] Error: ${segmentError.message}`);
+      console.error(`[${taskId}] ⚠️  Segment download failed, falling back to full audio...`);
+      console.error(`[${taskId}] ❌ Error Details:`, segmentError);
+      console.error(`[${taskId}] ❌ Error Message:`, segmentError.message);
       
       // FALLBACK: Download full audio
       useFullAudio = true;

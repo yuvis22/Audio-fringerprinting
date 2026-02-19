@@ -357,6 +357,7 @@ async function getVideoInfo(url) {
       '--dump-json',
       '--no-download',
       '--no-playlist',
+      '-f', 'b', // Force best format to prevent "Requested format is not available"
       url
     ]);
     

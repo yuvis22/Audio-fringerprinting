@@ -4,6 +4,7 @@ import { splitAudioSegments } from './audioExtractor.js';
 import { extractMetadata } from './metadataExtractor.js';
 import { identifyMusicTracks } from './musicIdentifier.js';
 import { cleanupFiles } from '../utils/fileCleanup.js';
+import { deleteTaskDirectory } from './videoDownloader.js';
 
 /**
  * Main video processing pipeline - NEW OPTIMIZED VERSION! ⚡
@@ -46,7 +47,7 @@ export async function processVideo(taskId, videoUrl, jobs) {
     let videoInfo;
     
     try {
-      downloadResult = await downloadVideo(videoUrl, downloadProgressCallback, { mode: 'segments' });
+      downloadResult = await downloadVideo(videoUrl, downloadProgressCallback, { mode: 'segments', taskId });
       
       if (downloadResult.mode === 'segments') {
         // SUCCESS! Got segments
@@ -60,7 +61,7 @@ export async function processVideo(taskId, videoUrl, jobs) {
       
       // FALLBACK: Download full audio
       useFullAudio = true;
-      const fullDownload = await downloadVideo(videoUrl, downloadProgressCallback, { mode: 'full' });
+      const fullDownload = await downloadVideo(videoUrl, downloadProgressCallback, { mode: 'full', taskId });
       
       if (fullDownload.audioFile) {
         audioFile = fullDownload.audioFile;
@@ -159,8 +160,10 @@ export async function processVideo(taskId, videoUrl, jobs) {
     console.log(`[${taskId}] ✅ Processing completed in ${processingTime}s (${useFullAudio ? 'full' : 'fast'} mode)`);
 
     // Cleanup files after a delay
+    // Cleanup files after a delay
     setTimeout(() => {
-      cleanupFiles([videoFile, audioFile, ...segmentFiles].filter(Boolean));
+      // cleanupFiles([videoFile, audioFile, ...segmentFiles].filter(Boolean));
+      deleteTaskDirectory(taskId); // Cleanup entire task directory
     }, 3600000); // 1 hour
 
   } catch (error) {
@@ -169,6 +172,8 @@ export async function processVideo(taskId, videoUrl, jobs) {
     job.error = error.message;
     
     // Cleanup on error
-    cleanupFiles([videoFile, audioFile, ...segmentFiles].filter(Boolean));
+    // Cleanup on error
+    // cleanupFiles([videoFile, audioFile, ...segmentFiles].filter(Boolean));
+    deleteTaskDirectory(taskId); // Cleanup entire task directory
   }
 }

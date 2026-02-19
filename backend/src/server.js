@@ -16,7 +16,15 @@ const PORT = process.env.PORT || 5001;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 
 // Allow multiple origins (comma-separated in env)
-const allowedOrigins = FRONTEND_URL.split(',').map(url => url.trim());
+// Allow multiple origins (comma-separated in env) + specific production domains
+const envOrigins = (process.env.FRONTEND_URL || '').split(',').map(url => url.trim()).filter(Boolean);
+const allowedOrigins = [
+  ...envOrigins,
+  'https://audio-fringerprinting.vercel.app',
+  'https://audio.filmash.com',
+  'https://audiofilmashfrontend.vercel.app', 
+  'http://localhost:3000'
+];
 
 // Middleware
 app.use(cors({

@@ -166,6 +166,57 @@ const MAX_DURATION = parseInt(process.env.MAX_VIDEO_DURATION) || 3600; // 1 hour
 // Unified via env var so other modules can read the same value
 const SEGMENT_DURATION = parseInt(process.env.SEGMENT_DURATION) || 15; // 15s per segment (better for ACRCloud)
 const NUM_SEGMENTS = parseInt(process.env.NUM_SEGMENTS) || 6; // Number of segments to attempt
+// Use __dirname to reliably locate cookies.txt in the backend root, regardless of CWD
+const COOKIES_FILE = path.resolve(__dirname, '../../cookies.txt');
+
+/**
+ * Initialize cookies from ENV if available
+ */
+async function initCookies() {
+  if (process.env.COOKIES_TXT_CONTENT) {
+    console.log('🍪 Found COOKIES_TXT_CONTENT in environment variables');
+    try {
+      // Write content to cookies.txt (overwriting if exists)
+      await fs.writeFile(COOKIES_FILE, process.env.COOKIES_TXT_CONTENT.trim());
+      console.log('✅ Successfully wrote cookies to:', COOKIES_FILE);
+    } catch (error) {
+      console.error('❌ Failed to write cookies from ENV:', error.message);
+    }
+  }
+}
+
+// Run initialization on module load
+initCookies().catch(console.error);
+
+/**
+ * Get yt-dlp arguments for cookies if file exists
+ */
+async function getCookieArgs() {
+  const exists = await fs.pathExists(COOKIES_FILE);
+  if (exists) {
+    console.log('🍪 Found cookies.txt at:', COOKIES_FILE);
+    
+    // Validate cookies content
+    try {
+      const content = await fs.readFile(COOKIES_FILE, 'utf8');
+      if (!content.includes('.instagram.com')) {
+        console.warn('⚠️  Instagram cookies MISSING in cookies.txt');
+      }
+      if (!content.includes('.youtube.com') && !content.includes('.google.com')) {
+        console.warn('⚠️  YouTube cookies MISSING in cookies.txt');
+      }
+    } catch (err) {
+      console.warn('⚠️  Could not validate cookies.txt content:', err.message);
+    }
+
+    return ['--cookies', COOKIES_FILE];
+  } else {
+    console.warn('⚠️  cookies.txt NOT FOUND at:', COOKIES_FILE);
+    console.warn('    Instagram/Facebook/YouTube downloads may fail without authentication.');
+    console.warn('    Please export cookies to this file OR set COOKIES_TXT_CONTENT env var.');
+    return [];
+  }
+}
 
 // URL cache to prevent re-downloads (expires after 1 hour)
 const urlCache = new Map();
@@ -364,9 +415,13 @@ async function getVideoInfo(url) {
       }
     }
 
+    // Add cookie args
+    const cookieArgs = await getCookieArgs();
+
     // Get video info FAST (no download!)
     const { stdout: infoJson } = await execAsyncSpawn(ytDlpCommand, [
       ...ytDlpArgs,
+      ...cookieArgs,
       '--quiet',
       '--no-warnings',
       '--dump-json',
@@ -411,8 +466,9 @@ async function getVideoInfo(url) {
  * @param {number} endTime - End time in seconds
  * @param {number} segmentIndex - Segment index for tracking
  * @param {string} title - Video title for filename
+ * @param {string} downloadDir - Directory to save the segment (default: global DOWNLOAD_DIR)
  */
-async function downloadAudioSegment(url, startTime, endTime, segmentIndex, title) {
+async function downloadAudioSegment(url, startTime, endTime, segmentIndex, title, downloadDir = DOWNLOAD_DIR) {
   try {
     // Check if yt-dlp is available
     let ytDlpCommand = 'yt-dlp';
@@ -437,9 +493,12 @@ async function downloadAudioSegment(url, startTime, endTime, segmentIndex, title
       }
     }
 
+    // Add cookie args
+    const cookieArgs = await getCookieArgs();
+
     const safeTitle = title ? title.replace(/[^a-z0-9]/gi, '_').substring(0, 50) : uuidv4();
     const filename = `${safeTitle}_segment${segmentIndex}_${startTime}-${endTime}.mp3`;
-    const outputPath = path.join(DOWNLOAD_DIR, filename);
+    const outputPath = path.join(downloadDir, filename);
 
     console.log(`⚡ Downloading segment ${segmentIndex}: ${startTime}s - ${endTime}s (${endTime - startTime}s)`);
 
@@ -477,6 +536,7 @@ async function downloadAudioSegment(url, startTime, endTime, segmentIndex, title
     // Otherwise fall back to yt-dlp segment download
     const downloadArgs = [
       ...ytDlpArgs,
+      ...cookieArgs,
       '--quiet',
       '--no-warnings',
       '--no-playlist',
@@ -514,7 +574,7 @@ async function downloadAudioSegment(url, startTime, endTime, segmentIndex, title
  * Downloads 4 segments (10 sec each) = 40 sec total instead of 10 min video!
  * 10-20x FASTER! ⚡⚡⚡
  */
-async function downloadAudioSegments(url, videoInfo, progressCallback) {
+async function downloadAudioSegments(url, videoInfo, progressCallback, downloadDir = DOWNLOAD_DIR) {
   const { duration, title } = videoInfo;
   
   // Calculate smart segment positions
@@ -526,7 +586,7 @@ async function downloadAudioSegments(url, videoInfo, progressCallback) {
 
   // Download ALL segments in PARALLEL - MAXIMUM SPEED!
   const downloadPromises = segmentPositions.map((segment, index) => {
-    return downloadAudioSegment(url, segment.start, segment.end, index, title)
+    return downloadAudioSegment(url, segment.start, segment.end, index, title, downloadDir)
       .then(filePath => {
         completed++;
         if (progressCallback) {
@@ -563,14 +623,14 @@ async function downloadAudioSegments(url, videoInfo, progressCallback) {
 /**
  * Download direct video file (MP4, WebM, etc.)
  */
-async function downloadDirectFile(url) {
+async function downloadDirectFile(url, downloadDir = DOWNLOAD_DIR) {
   try {
     // Prefer extracting audio directly from remote file via ffmpeg (no full video download)
     const urlPath = new URL(url).pathname;
     const safeBase = path.basename(urlPath) || uuidv4();
     const title = safeBase.replace(/\.[^.]+$/, '');
     const audioFilename = `${uuidv4()}.mp3`;
-    const audioFile = path.join(DOWNLOAD_DIR, audioFilename);
+    const audioFile = path.join(downloadDir, audioFilename);
 
     try {
       console.log('Attempting ffmpeg remote extraction for direct video URL');
@@ -641,7 +701,7 @@ async function downloadDirectFile(url) {
       // Fallback to previous behavior: download full video file then probe
       const ext = path.extname(urlPath) || '.mp4';
       const filename = `${uuidv4()}${ext}`;
-      const videoFile = path.join(DOWNLOAD_DIR, filename);
+      const videoFile = path.join(downloadDir, filename);
 
       // Download the file with axios (existing behavior)
       const response = await axios({
@@ -721,9 +781,9 @@ async function downloadDirectFile(url) {
  * @param {string} url - Video URL
  * @param {Function} progressCallback - Callback function(progress: number) for download progress 0-100
  */
-async function downloadWithYtDlp(url, progressCallback = null) {
+async function downloadWithYtDlp(url, progressCallback = null, downloadDir = DOWNLOAD_DIR) {
   // Download directly as MP3 - no video needed!
-  const outputPath = path.join(DOWNLOAD_DIR, `%(title)s.%(ext)s`);
+  const outputPath = path.join(downloadDir, `%(title)s.%(ext)s`);
   
   try {
     // Check if yt-dlp is available and determine the command to use
@@ -757,6 +817,9 @@ async function downloadWithYtDlp(url, progressCallback = null) {
       }
     }
     
+    // Add cookie args
+    const cookieArgs = await getCookieArgs();
+    
     // Check if aria2c is available (for maximum speed) - if not, yt-dlp will fallback automatically
     let hasAria2c = false;
     try {
@@ -774,6 +837,7 @@ async function downloadWithYtDlp(url, progressCallback = null) {
     // First, get video info
     const { stdout: infoJson } = await execAsyncSpawn(ytDlpCommand, [
       ...ytDlpArgs,
+      ...cookieArgs,
       '--quiet',
       '--no-warnings',
       '--dump-json',
@@ -824,14 +888,14 @@ async function downloadWithYtDlp(url, progressCallback = null) {
 
     // If progress callback provided, track download progress
     if (progressCallback) {
-      await execAsyncSpawnWithProgress(ytDlpCommand, [...ytDlpArgs, ...downloadArgs], progressCallback);
+      await execAsyncSpawnWithProgress(ytDlpCommand, [...ytDlpArgs, ...cookieArgs, ...downloadArgs], progressCallback);
     } else {
-      await execAsyncSpawn(ytDlpCommand, [...ytDlpArgs, ...downloadArgs]);
+      await execAsyncSpawn(ytDlpCommand, [...ytDlpArgs, ...cookieArgs, ...downloadArgs]);
     }
 
     // Find the downloaded audio file (now it's already MP3!)
     const title = info.title.replace(/[^a-z0-9]/gi, '_').substring(0, 100);
-    const audioFile = path.join(DOWNLOAD_DIR, `${title}.mp3`);
+    const audioFile = path.join(downloadDir, `${title}.mp3`);
     
     // Wait for file to be written (reduced wait time for faster response)
     let retries = 20; // More retries but shorter wait
@@ -842,10 +906,10 @@ async function downloadWithYtDlp(url, progressCallback = null) {
 
     if (!(await fs.pathExists(audioFile))) {
       // Try to find any MP3 file in download dir
-      const files = await fs.readdir(DOWNLOAD_DIR);
+      const files = await fs.readdir(downloadDir);
       const recentFile = files
         .filter(f => f.endsWith('.mp3'))
-        .map(f => path.join(DOWNLOAD_DIR, f))
+        .map(f => path.join(downloadDir, f))
         .sort((a, b) => fs.statSync(b).mtime - fs.statSync(a).mtime)[0];
       
       if (recentFile) {
@@ -885,7 +949,7 @@ async function downloadWithYtDlp(url, progressCallback = null) {
  * Download audio from YouTube using node-ytdl-core (faster for YouTube only)
  * Downloads only audio - no video needed!
  */
-async function downloadYouTube(url) {
+async function downloadYouTube(url, downloadDir = DOWNLOAD_DIR) {
   try {
     const info = await ytdl.getInfo(url);
     
@@ -894,7 +958,7 @@ async function downloadYouTube(url) {
     }
 
     const title = info.videoDetails.title.replace(/[^a-z0-9]/gi, '_').substring(0, 100);
-    const audioFile = path.join(DOWNLOAD_DIR, `${title}.mp3`);
+    const audioFile = path.join(downloadDir, `${title}.mp3`);
 
     return new Promise((resolve, reject) => {
       // Download only audio stream with 5G SPEED (100+ Mbps)
@@ -963,8 +1027,10 @@ async function downloadYouTube(url) {
  * @param {string} url - Video URL
  * @param {Function} progressCallback - Optional callback for download progress (0-100)
  * @returns {Object} - { videoInfo, segmentFiles: [{file, startTime, endTime}] }
+
  */
-export async function downloadVideoSegments(url, progressCallback = null) {
+export async function downloadVideoSegments(url, progressCallback = null, options = {}) {
+  const downloadDir = options.downloadDir || DOWNLOAD_DIR;
   try {
     console.log('🚀 FAST MODE: Downloading segments for music identification...');
     
@@ -981,7 +1047,7 @@ export async function downloadVideoSegments(url, progressCallback = null) {
         const overall = 20 + Math.round(segProgress * 0.8);
         progressCallback(overall);
       }
-    });
+    }, downloadDir);
     
     if (progressCallback) progressCallback(100);
     
@@ -1006,17 +1072,18 @@ export async function downloadVideoSegments(url, progressCallback = null) {
  * @param {string} url - Video URL
  * @param {Function} progressCallback - Optional callback for download progress (0-100)
  */
-export async function downloadFullAudio(url, progressCallback = null) {
+export async function downloadFullAudio(url, progressCallback = null, options = {}) {
+  const downloadDir = options.downloadDir || DOWNLOAD_DIR;
   console.log('📥 FULL MODE: Downloading complete audio (slower)...');
   
   // Check if it's a direct video file
   if (isDirectVideoFile(url)) {
     console.log('Detected direct video file, downloading directly...');
-    return await downloadDirectFile(url);
+    return await downloadDirectFile(url, downloadDir);
   }
 
   // ALWAYS use yt-dlp with MAXIMUM parallelization
-  return await downloadWithYtDlp(url, progressCallback);
+  return await downloadWithYtDlp(url, progressCallback, downloadDir);
 }
 
 /**
@@ -1030,11 +1097,38 @@ export async function downloadFullAudio(url, progressCallback = null) {
 export async function downloadVideo(url, progressCallback = null, options = {}) {
   const mode = options.mode || 'segments'; // Default to FAST mode!
   
+  // Setup task-specific directory if taskId provided
+  let downloadDir = DOWNLOAD_DIR;
+  if (options.taskId) {
+    downloadDir = path.join(DOWNLOAD_DIR, options.taskId);
+    await fs.ensureDir(downloadDir);
+    console.log(`📂 Using isolated download directory: ${downloadDir}`);
+  }
+  
+  // Pass downloadDir to internal functions
+  const downloadOptions = { ...options, downloadDir };
+  
   if (mode === 'segments') {
     // FAST MODE: Download only segments (default)
-    return await downloadVideoSegments(url, progressCallback);
+    return await downloadVideoSegments(url, progressCallback, downloadOptions);
   } else {
     // FULL MODE: Download complete audio (fallback)
-    return await downloadFullAudio(url, progressCallback);
+    return await downloadFullAudio(url, progressCallback, downloadOptions);
+  }
+}
+
+/**
+ * Delete task-specific download directory
+ */
+export async function deleteTaskDirectory(taskId) {
+  if (!taskId) return;
+  const taskDir = path.join(DOWNLOAD_DIR, taskId);
+  try {
+    if (await fs.pathExists(taskDir)) {
+      await fs.remove(taskDir);
+      console.log(`🧹 Cleaned up task directory: ${taskDir}`);
+    }
+  } catch (error) {
+    console.error(`❌ Failed to cleanup task directory ${taskDir}:`, error.message);
   }
 }

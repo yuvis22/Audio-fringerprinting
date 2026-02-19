@@ -34,3 +34,5 @@ Thumbs.db
 # Build
 dist/
 build/
+
+cookies.txt

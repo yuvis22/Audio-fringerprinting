@@ -429,6 +429,7 @@ async function getVideoInfo(url) {
         '--dump-json',
         '--no-download',
         '--no-playlist',
+        '-f', 'b',
         url
       ]);
       infoJson = result.stdout;

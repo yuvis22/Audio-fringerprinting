@@ -6,10 +6,11 @@ import { dirname, join } from 'path';
 import extractRoutes from './routes/extract.js';
 import { setupCleanup } from './utils/fileCleanup.js';
 
-dotenv.config();
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// Explicitly load .env from the backend root directory
+dotenv.config({ path: join(__dirname, '../.env') });
 
 const app = express();
 const PORT = process.env.PORT || 5001;
